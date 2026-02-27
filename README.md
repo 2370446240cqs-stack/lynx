@@ -103,7 +103,7 @@ limitations under the License.
 ## Citation
 If you find this code useful for your research, please cite us via the BibTeX below.
 ```BibTeX
-@inproceedings{sang2025lynx,
+@inproceedings{sang2026lynx,
   title    = {Lynx: Towards High-Fidelity Personalized Video Generation},
   author   = {Sang, Shen and Zhi, Tiancheng and Gu, Tianpei and Liu, Jing and Luo, Linjie},
   booktitle={CVPR},
