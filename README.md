@@ -19,6 +19,10 @@ Intelligent Creation, ByteDance
 * Equal Contribution
 </p>
 
+<p style="font-size: 1.05em; margin: 8px 0;">
+CVPR 2026
+</p>
+
 [![arXiv](https://img.shields.io/badge/arXiv-2509.15496-b31b1b.svg)](https://arxiv.org/abs/2509.15496)
 [![Project Page](https://img.shields.io/badge/Project-Page-green.svg)](https://byteaigc.github.io/Lynx/)
 [![Hugging Face Model](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-yellow)](https://huggingface.co/ByteDance/lynx)
@@ -99,10 +103,10 @@ limitations under the License.
 ## Citation
 If you find this code useful for your research, please cite us via the BibTeX below.
 ```BibTeX
-@article{sang2025lynx,
+@inproceedings{sang2025lynx,
   title    = {Lynx: Towards High-Fidelity Personalized Video Generation},
   author   = {Sang, Shen and Zhi, Tiancheng and Gu, Tianpei and Liu, Jing and Luo, Linjie},
-  journal  = {arXiv preprint arXiv:2509.15496},
-  year     = {2025}
+  booktitle={CVPR},
+  year={2026}
 }
 ```
