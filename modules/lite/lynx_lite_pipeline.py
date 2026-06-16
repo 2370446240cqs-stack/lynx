@@ -273,7 +273,12 @@ class LynxLiteWanPipeline(WanPipeline):
                 face_embeds, self.do_classifier_free_guidance, device=device, dtype=self.transformer.dtype
             )
         else:
-            face_token_embeds = torch.cat([torch.zeros_like(face_token_embeds), face_token_embeds], dim=0)
+            if not isinstance(face_token_embeds, torch.Tensor):
+                face_token_embeds = torch.tensor(face_token_embeds)
+            if face_token_embeds.ndim == 2:
+                face_token_embeds = face_token_embeds.unsqueeze(0)
+            if self.do_classifier_free_guidance:
+                face_token_embeds = torch.cat([torch.zeros_like(face_token_embeds), face_token_embeds], dim=0)
 
         face_token_embeds = face_token_embeds.to(device=device, dtype=self.transformer.dtype)
 

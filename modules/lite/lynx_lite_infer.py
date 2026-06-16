@@ -63,11 +63,26 @@ class LynxLiteWanInfer():
         
         generator = torch.Generator().manual_seed(style_info.seed) if style_info.seed >= 0 else None
 
+        pipe_inputs = {"face_embeds": subject_info.face_embeds}
+        if getattr(subject_info, "feature_tokens", None) is not None:
+            feature_tokens = torch.as_tensor(subject_info.feature_tokens)
+            if feature_tokens.ndim == 2:
+                feature_tokens = feature_tokens.unsqueeze(0)
+            first_processor = self.pipe.transformer.blocks[0].attn2.processor
+            expected_dim = getattr(getattr(first_processor, "to_k_ip", None), "in_features", None)
+            if expected_dim is not None and feature_tokens.shape[-1] != expected_dim:
+                raise ValueError(
+                    "VGGT-Omega feature dimension does not match the lite IP-adapter: "
+                    f"got {feature_tokens.shape[-1]}, expected {expected_dim}. "
+                    "Use a compatible adapter/projection, or choose a VGGT-Omega feature with the expected dimension."
+                )
+            pipe_inputs = {"face_token_embeds": feature_tokens}
+
         # Generate
         result_frames = self.pipe(
             prompt=style_info.prompt,
             negative_prompt=style_info.negative_prompt,
-            face_embeds=subject_info.face_embeds,
+            **pipe_inputs,
             ip_scale=getattr(style_info, "ip_scale", 1.0),
             height=style_info.height,
             width=style_info.width,

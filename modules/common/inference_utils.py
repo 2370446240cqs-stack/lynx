@@ -23,6 +23,8 @@ class SubjectInfo:
     image_pil: Optional[Image.Image] = None
     landmarks: Optional[Union[np.ndarray, torch.Tensor]] = None
     face_embeds: Optional[Union[np.ndarray, torch.Tensor]] = None
+    feature_tokens: Optional[Union[np.ndarray, torch.Tensor]] = None
+    feature_source: str = "face"
 
 
 @dataclass

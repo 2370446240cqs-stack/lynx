@@ -175,8 +175,11 @@ class LynxWanPipeline(WanPipeline):
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "np",
         return_dict: bool = True,
+
+        # 这两个参数很重要，将重采样后的人脸特征和参考特征注入了生成流程
         attention_kwargs: Optional[Dict[str, Any]] = None,
         attention_kwargs_uncond: Optional[Dict[str, Any]] = None,
+
         callback_on_step_end: Optional[
             Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
         ] = None,

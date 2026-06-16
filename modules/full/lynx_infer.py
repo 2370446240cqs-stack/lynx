@@ -27,6 +27,7 @@ class LynxWanInfer():
         dtype: Union[str, torch.dtype] = "bf16"
     ) -> None:
         logger.info("Initializing pipeline")
+        #初始化LynxWanPipeline对象，核心的视频生成流水线
         if adapter_path is not None:
             assert pipe is None, "Model path is already provided!"
             dtype = dtype_mapping[dtype] if isinstance(dtype, str) else dtype
@@ -42,6 +43,7 @@ class LynxWanInfer():
 
         assert self.pipe, "Init pipeline failed!"
 
+        #安全性检查模型NSFW(nsfw_classifier)
         logger.info("Initializing NSFW classifier")
         from transformers import pipeline
         self.nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection")
@@ -58,13 +60,38 @@ class LynxWanInfer():
         logger.info(f"Generating video for style: {style_info.style_name}")
 
         # Override the style info args
+        #临时修改生成参数
         for k in override_kwargs:
             setattr(style_info, k, override_kwargs[k])
 
-        if hasattr(self.pipe, "resampler"):
+        if getattr(subject_info, "feature_tokens", None) is not None:
+            feature_tokens = torch.as_tensor(subject_info.feature_tokens)
+            if feature_tokens.ndim == 2:
+                feature_tokens = feature_tokens.unsqueeze(0)
+
+            first_processor = self.pipe.transformer.blocks[0].attn2.processor
+            expected_dim = getattr(getattr(first_processor, "to_k_ip", None), "in_features", None)
+            if expected_dim is not None and feature_tokens.shape[-1] != expected_dim:
+                raise ValueError(
+                    "VGGT-Omega feature dimension does not match the full IP-adapter: "
+                    f"got {feature_tokens.shape[-1]}, expected {expected_dim}. "
+                    "The released full Lynx adapter is built for its own resampler output. "
+                    "Train/provide a VGGT-Omega-to-IP adapter or projection before using this path."
+                )
+
+            feature_tokens = feature_tokens.to(device=self.pipe.device, dtype=self.pipe.dtype)
+            ip_hidden_states = [feature_tokens]
+            ip_hidden_states_uncond = [torch.zeros_like(feature_tokens)]
+
+        elif hasattr(self.pipe, "resampler"):
+            #subject_info中已经提取了人脸特征向量，这一步就是把subject_info.face_embeds这个numpy数组转换成tensor
             arcface_embed = torch.from_numpy(subject_info.face_embeds)
+            #将数据搬运到正确的硬件（GPU）上，并转换成一致的精度格式。
             arcface_embed = arcface_embed.to(device=self.pipe.device, dtype=self.pipe.dtype)
+            #经过 [None, None, :] 处理后，原本形状为 (512,) 的数据，变成了 (1, 1, 512)。满足Transformer的输入维度
             arcface_embed = arcface_embed[None,None,:]
+
+            # 提取特征向量 -> 送入重采样器 -> 生成条件/非条件特征
             face_embeds = self.pipe.resampler(arcface_embed)
             ip_hidden_states = [face_embeds]
             face_embeds_uncond = self.pipe.resampler(arcface_embed * 0)
@@ -73,7 +100,8 @@ class LynxWanInfer():
             ip_hidden_states = None
             ip_hidden_states_uncond = None
 
-        if hasattr(self.pipe.transformer.blocks[0].attn1.processor, "to_k_ref"):
+        if hasattr(self.pipe.transformer.blocks[0].attn1.processor, "to_k_ref") and subject_info.landmarks is not None:
+
             from ..common.face_utils import align_face
             aligned_face_image_pil = align_face(subject_info.image_pil, subject_info.landmarks, extend_face_crop=True, face_size=256)
             aligned_face_image_np = np.array(aligned_face_image_pil)
@@ -82,11 +110,14 @@ class LynxWanInfer():
             ref_generator = torch.Generator().manual_seed(style_info.seed + 1) if style_info.seed >= 0 else None
             ref_buffer_uncond = self.pipe.encode_reference_images([aligned_face_image_pil], drop=True, generator=ref_generator)
         else:
+            if hasattr(self.pipe.transformer.blocks[0].attn1.processor, "to_k_ref"):
+                logger.warning("Skipping Ref-adapter because no face landmarks are available for this subject")
             ref_buffer = None
             ref_buffer_uncond = None
         
         generator = torch.Generator().manual_seed(style_info.seed) if style_info.seed >= 0 else None
 
+        #调用Wan2.1来生成视频，其中attention_kwargs和attention_kwargs_uncond为注入到模型中的人脸特征
         result_frames = self.pipe(
             prompt=style_info.prompt,
             negative_prompt=style_info.negative_prompt,
@@ -98,6 +129,9 @@ class LynxWanInfer():
             guidance_scale_i=getattr(style_info, "guidance_scale_i", None),
             generator=generator, 
             output_type="pil",
+
+            #这两个参数很重要，将重采样后的人脸特征和参考特征注入了生成流程（论文中提到的resampler输出的16个5120维向量与16个register_token拼接在哪里？
+            #在resampler.forword中，resampler输入时就拼接了
             attention_kwargs={"ip_hidden_states": ip_hidden_states, "ip_scale": style_info.ip_scale, "ref_buffer": ref_buffer, "ref_scale": style_info.ref_scale},
             attention_kwargs_uncond={"ip_hidden_states": ip_hidden_states_uncond, "ip_scale": style_info.ip_scale, "ref_buffer": ref_buffer_uncond, "ref_scale": style_info.ref_scale},
         ).frames[0]

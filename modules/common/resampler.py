@@ -163,6 +163,7 @@ class Resampler(nn.Module):
 
 
     def forward(self, x):
+        #对16个512维的人脸特征向量进行register_token的拼接
         if self.pos_emb is not None:
             n, device = x.shape[1], x.device
             pos_emb = self.pos_emb(torch.arange(n, device=device))
