@@ -75,31 +75,31 @@ class LynxLiteWanPipeline(WanPipeline):
 
 
     def init_image_proj_modules(self, model_dir, device="cuda", dtype=torch.bfloat16):
-        from ..common.resampler import Resampler
-        self.resampler = Resampler(
-            depth=4,
-            dim=1280,
-            dim_head=64,
-            embedding_dim=512,
-            ff_mult=4,
-            heads=20,
-            num_queries=16,
-            output_dim=2048,
-        )
-        self.resampler.to(device=device, dtype=dtype)
-        self.resampler.eval()
-
         resampler_safetensors = os.path.join(model_dir, "resampler.safetensors")
-        assert os.path.exists(resampler_safetensors)
-        state_dicts = load_file(resampler_safetensors, device='cpu')
-        self.resampler.load_state_dict(state_dicts)
+        if os.path.exists(resampler_safetensors):
+            from ..common.resampler import Resampler
+            self.resampler = Resampler(
+                depth=4,
+                dim=1280,
+                dim_head=64,
+                embedding_dim=512,
+                ff_mult=4,
+                heads=20,
+                num_queries=16,
+                output_dim=2048,
+            )
+            self.resampler.to(device=device, dtype=dtype)
+            self.resampler.eval()
+            state_dicts = load_file(resampler_safetensors, device='cpu')
+            self.resampler.load_state_dict(state_dicts)
 
         ip_adapter_safetensor = os.path.join(model_dir, "ip_layers.safetensors")
         assert os.path.exists(ip_adapter_safetensor)
         state_dicts = load_file(ip_adapter_safetensor, device='cpu')
+        cross_attention_dim = state_dicts['0.to_k_ip.weight'].shape[1]
 
         self.transformer, ip_layers = register_ip_adapter_wan(
-            self.transformer, cross_attention_dim=2048, hidden_size=5120, layers=2, dtype=dtype
+            self.transformer, cross_attention_dim=cross_attention_dim, hidden_size=5120, layers=2, dtype=dtype
         )
         ip_layers.load_state_dict(state_dicts)
 
