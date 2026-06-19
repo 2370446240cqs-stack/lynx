@@ -24,7 +24,8 @@ class LynxWanInfer():
         base_model_path: str = None,
         pipe: LynxWanPipeline = None,
         device: Union[str, torch.device] = "cuda",
-        dtype: Union[str, torch.dtype] = "bf16"
+        dtype: Union[str, torch.dtype] = "bf16",
+        enable_nsfw_check: bool = False,
     ) -> None:
         logger.info("Initializing pipeline")
         #初始化LynxWanPipeline对象，核心的视频生成流水线
@@ -44,9 +45,14 @@ class LynxWanInfer():
         assert self.pipe, "Init pipeline failed!"
 
         #安全性检查模型NSFW(nsfw_classifier)
-        logger.info("Initializing NSFW classifier")
-        from transformers import pipeline
-        self.nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection")
+        self.enable_nsfw_check = enable_nsfw_check
+        if self.enable_nsfw_check:
+            logger.info("Initializing NSFW classifier")
+            from transformers import pipeline
+            self.nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection")
+        else:
+            logger.warning("NSFW check is disabled")
+            self.nsfw_classifier = None
 
     def generate_t2v(
         self,
@@ -136,24 +142,30 @@ class LynxWanInfer():
             attention_kwargs_uncond={"ip_hidden_states": ip_hidden_states_uncond, "ip_scale": style_info.ip_scale, "ref_buffer": ref_buffer_uncond, "ref_scale": style_info.ref_scale},
         ).frames[0]
 
-        # Safety check
-        logger.info("Running first NSFW classifier")
-        nsfw_scores = []
-        for frame in result_frames:
-            for item in self.nsfw_classifier(frame):
-                if item['label'] == 'nsfw':
-                    nsfw_score = item['score']
-            nsfw_scores.append(nsfw_score)
-        nsfw_score = max(nsfw_scores)
-        
-        logger.info("Running second NSFW classifier")
-        import tensorflow as tf
-        tf.config.set_visible_devices([], 'GPU')
-        import opennsfw2 as n2
-        nsfw_scores2 = n2.predict_images(result_frames)
-        nsfw_score2 = max(nsfw_scores2)
-        
-        if nsfw_score >= 0.85 or nsfw_score2 >= 0.75:
+        nsfw_detected = False
+        if self.enable_nsfw_check:
+            # Safety check
+            logger.info("Running first NSFW classifier")
+            nsfw_scores = []
+            for frame in result_frames:
+                nsfw_score = 0.0
+                for item in self.nsfw_classifier(frame):
+                    if item['label'] == 'nsfw':
+                        nsfw_score = item['score']
+                nsfw_scores.append(nsfw_score)
+            nsfw_score = max(nsfw_scores)
+
+            logger.info("Running second NSFW classifier")
+            import tensorflow as tf
+            tf.config.set_visible_devices([], 'GPU')
+            import opennsfw2 as n2
+            nsfw_scores2 = n2.predict_images(result_frames)
+            nsfw_score2 = max(nsfw_scores2)
+            nsfw_detected = nsfw_score >= 0.85 or nsfw_score2 >= 0.75
+        else:
+            logger.warning("Skipping NSFW check")
+
+        if nsfw_detected:
             logger.warning("NSFW detected! Not saving video")
         else:
             result_frames = np.array(result_frames)

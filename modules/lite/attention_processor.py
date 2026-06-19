@@ -185,7 +185,8 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
             hidden_states = hidden_states + hidden_states_img
 
         # Add IPA residual
-        ip_scale = ip_scale or self.scale
+        if ip_scale is None:
+            ip_scale = self.scale
         hidden_states = hidden_states + ip_scale * ip_hidden_states
 
         hidden_states = attn.to_out[0](hidden_states)

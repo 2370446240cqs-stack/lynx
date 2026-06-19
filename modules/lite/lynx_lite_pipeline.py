@@ -12,6 +12,7 @@
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import os
+import json
 import torch
 import numpy as np
 
@@ -97,11 +98,40 @@ class LynxLiteWanPipeline(WanPipeline):
         assert os.path.exists(ip_adapter_safetensor)
         state_dicts = load_file(ip_adapter_safetensor, device='cpu')
         cross_attention_dim = state_dicts['0.to_k_ip.weight'].shape[1]
+        adapter_config_path = os.path.join(model_dir, "train_config.json")
+        adapter_count = self.count_adapter_layers(state_dicts)
+        layers = self.infer_adapter_interval(len(self.transformer.blocks), adapter_count)
+        if os.path.exists(adapter_config_path):
+            with open(adapter_config_path, "r", encoding="utf-8") as f:
+                layers = int(json.load(f).get("ip_layers", layers))
 
         self.transformer, ip_layers = register_ip_adapter_wan(
-            self.transformer, cross_attention_dim=cross_attention_dim, hidden_size=5120, layers=2, dtype=dtype
+            self.transformer, cross_attention_dim=cross_attention_dim, hidden_size=5120, layers=layers, dtype=dtype
         )
         ip_layers.load_state_dict(state_dicts)
+
+    @staticmethod
+    def count_adapter_layers(state_dicts):
+        layer_indices = set()
+        for key in state_dicts.keys():
+            prefix = key.split(".", 1)[0]
+            if prefix.isdigit():
+                layer_indices.add(int(prefix))
+        if not layer_indices:
+            raise ValueError("No IP-adapter layer weights found in ip_layers.safetensors")
+        return len(layer_indices)
+
+
+    @staticmethod
+    def infer_adapter_interval(num_blocks, adapter_count):
+        for interval in range(1, num_blocks + 1):
+            if len(range(0, num_blocks, interval)) == adapter_count:
+                return interval
+        raise ValueError(
+            f"Cannot infer adapter interval: transformer has {num_blocks} blocks, "
+            f"but checkpoint has {adapter_count} adapter layers. "
+            "Use an adapter directory that contains train_config.json with the original ip_layers value."
+        )
 
 
     def encode_face_embedding(self, face_embeds, do_classifier_free_guidance, device, dtype):
