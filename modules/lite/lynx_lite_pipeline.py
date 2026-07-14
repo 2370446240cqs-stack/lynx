@@ -31,6 +31,15 @@ from modules.lite.trasnformer_wan import WanTransformer3DModel
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+def get_scheduled_ip_scale(ip_scale, ip_scale_end, step_index, num_steps):
+    if ip_scale_end is None:
+        return ip_scale
+    if num_steps <= 1:
+        return ip_scale_end
+    ratio = step_index / float(num_steps - 1)
+    return float(ip_scale + (ip_scale_end - ip_scale) * ratio)
+
+
 class LynxLiteWanPipeline(WanPipeline):
     r""" Pipeline for WanPipeline """
     @classmethod
@@ -101,14 +110,26 @@ class LynxLiteWanPipeline(WanPipeline):
         adapter_config_path = os.path.join(model_dir, "train_config.json")
         adapter_count = self.count_adapter_layers(state_dicts)
         layers = self.infer_adapter_interval(len(self.transformer.blocks), adapter_count)
+        gate_init = 0.1
         if os.path.exists(adapter_config_path):
             with open(adapter_config_path, "r", encoding="utf-8") as f:
-                layers = int(json.load(f).get("ip_layers", layers))
+                adapter_config = json.load(f)
+                layers = int(adapter_config.get("ip_layers", layers))
+                gate_init = float(adapter_config.get("ip_gate_init", gate_init))
 
         self.transformer, ip_layers = register_ip_adapter_wan(
-            self.transformer, cross_attention_dim=cross_attention_dim, hidden_size=5120, layers=layers, dtype=dtype
+            self.transformer,
+            cross_attention_dim=cross_attention_dim,
+            hidden_size=5120,
+            layers=layers,
+            dtype=dtype,
+            gate_init=gate_init,
         )
-        ip_layers.load_state_dict(state_dicts)
+        missing_keys, unexpected_keys = ip_layers.load_state_dict(state_dicts, strict=False)
+        if unexpected_keys:
+            raise RuntimeError(f"Unexpected IP-adapter checkpoint keys: {unexpected_keys}")
+        if missing_keys:
+            logger.warning(f"IP-adapter checkpoint is missing new stabilization keys, using defaults: {missing_keys}")
 
     @staticmethod
     def count_adapter_layers(state_dicts):
@@ -169,6 +190,7 @@ class LynxLiteWanPipeline(WanPipeline):
         face_embeds: Optional[torch.FloatTensor] = None,
         face_token_embeds: Optional[torch.FloatTensor] = None,
         ip_scale: float = 1.0,
+        ip_scale_end: Optional[float] = None,
         height: int = 480,
         width: int = 832,
         num_frames: int = 81,
@@ -348,12 +370,13 @@ class LynxLiteWanPipeline(WanPipeline):
                 self._current_timestep = t
                 latent_model_input = latents.to(transformer_dtype)
                 timestep = t.expand(latents.shape[0])
+                current_ip_scale = get_scheduled_ip_scale(ip_scale, ip_scale_end, i, len(timesteps))
 
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,
                     image_embed=face_token_embeds,
-                    ip_scale=ip_scale,
+                    ip_scale=current_ip_scale,
                     encoder_hidden_states=prompt_embeds,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,

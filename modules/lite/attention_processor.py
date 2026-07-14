@@ -23,7 +23,10 @@ def register_ip_adapter_wan(
     cross_attention_dim=2048,
     dtype=torch.float32,
     init_method="zero",
-    layers=None
+    layers=None,
+    gate_init=0.1,
+    normalize_ip=True,
+    normalize_ip_output=True,
 ):
     attn_procs = {}
     transformer_sd = model.state_dict()
@@ -40,7 +43,10 @@ def register_ip_adapter_wan(
         name = f"blocks.{i}.attn2.processor"
         attn_procs[name] = IPAWanAttnProcessor2_0(
             hidden_size=hidden_size,
-            cross_attention_dim=cross_attention_dim
+            cross_attention_dim=cross_attention_dim,
+            gate_init=gate_init,
+            normalize_ip=normalize_ip,
+            normalize_ip_output=normalize_ip_output,
         )
 
         if init_method == "zero":
@@ -71,6 +77,9 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
         cross_attention_dim=None, 
         scale=1.0, 
         bias=False,
+        gate_init=0.1,
+        normalize_ip=True,
+        normalize_ip_output=True,
     ):
         super().__init__()
 
@@ -80,7 +89,11 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
         self.hidden_size = hidden_size
         self.cross_attention_dim = cross_attention_dim
         self.scale = scale
+        self.normalize_ip = normalize_ip
+        self.normalize_ip_output = normalize_ip_output
 
+        ip_dim = cross_attention_dim or hidden_size
+        self.norm_ip_in = nn.LayerNorm(ip_dim, eps=1e-5) if normalize_ip else nn.Identity()
         self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=bias)
         self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=bias)
 
@@ -91,6 +104,8 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
             torch.nn.init.zeros_(self.to_v_ip.bias)
 
         self.norm_rms_k = RMSNorm(hidden_size, eps=1e-5, elementwise_affine=False)
+        self.norm_rms_ip_out = RMSNorm(hidden_size, eps=1e-5, elementwise_affine=False) if normalize_ip_output else nn.Identity()
+        self.ip_residual_gate = nn.Parameter(torch.tensor(float(gate_init)))
 
 
     def __call__(
@@ -117,7 +132,7 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
         # =============================================================
         batch_size = image_embed.size(0)
 
-        ip_hidden_states = image_embed
+        ip_hidden_states = self.norm_ip_in(image_embed)
         ip_query = query # attn.to_q(hidden_states.clone())
         ip_key = self.to_k_ip(ip_hidden_states)
         ip_value = self.to_v_ip(ip_hidden_states)
@@ -139,6 +154,7 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
 
         ip_hidden_states = ip_hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * ip_head_dim)
         ip_hidden_states = ip_hidden_states.to(ip_query.dtype)
+        ip_hidden_states = self.norm_rms_ip_out(ip_hidden_states)
         # ===========================================================================
 
         if attn.norm_q is not None:
@@ -187,7 +203,8 @@ class IPAWanAttnProcessor2_0(torch.nn.Module):
         # Add IPA residual
         if ip_scale is None:
             ip_scale = self.scale
-        hidden_states = hidden_states + ip_scale * ip_hidden_states
+        ip_gate = torch.tanh(self.ip_residual_gate).to(dtype=hidden_states.dtype)
+        hidden_states = hidden_states + ip_scale * ip_gate * ip_hidden_states
 
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)

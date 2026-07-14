@@ -123,6 +123,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument("--ip_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--ip_scale_end",
+        type=float,
+        default=None,
+        help="Optional final IP scale. If set, linearly schedules ip_scale to this value over denoising.",
+    )
 
     # Runtime
     parser.add_argument(
@@ -230,6 +236,7 @@ def main():
         num_inference_steps=args.num_inference_steps,
         guidance_scale=args.guidance_scale,
         ip_scale=args.ip_scale,
+        ip_scale_end=args.ip_scale_end,
         seed=args.seed,
     )
 

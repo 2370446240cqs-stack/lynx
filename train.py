@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import inspect
 import json
 import os
 import time
@@ -72,6 +73,9 @@ class TrainConfig:
     vae_tiling: bool = True
     empty_cache_steps: int = 1
     ip_scale: float = 1.0
+    train_ip_scale_min: float = 0.0
+    train_ip_scale_max: float = 0.1
+    ip_gate_init: float = 0.1
     ip_layers: int = 2
     init_method: str = "zero"
     resume_ip_layers: str = ""
@@ -96,18 +100,35 @@ class VideoVGGTFeatureDataset(Dataset):
             raise FileNotFoundError(f"Training data directory not found: {self.data_dir}")
 
         self.samples = []
+        skipped_samples = []
         for video_path in sorted(self.data_dir.glob("*.mp4")):
             stem = video_path.stem
             prompt_path = self.data_dir / f"{stem}.txt"
             feature_path = self.data_dir / f"{stem}.npz"
             if not prompt_path.is_file() or not feature_path.is_file():
-                raise FileNotFoundError(
-                    f"Sample {stem} is incomplete. Expected {video_path.name}, {prompt_path.name}, and {feature_path.name}."
-                )
+                missing = []
+                if not prompt_path.is_file():
+                    missing.append(prompt_path.name)
+                if not feature_path.is_file():
+                    missing.append(feature_path.name)
+                skipped_samples.append((stem, missing))
+                continue
             self.samples.append((video_path, prompt_path, feature_path))
 
         if not self.samples:
-            raise ValueError(f"No .mp4 samples found in {self.data_dir}")
+            raise ValueError(f"No complete training samples found in {self.data_dir}")
+
+        if skipped_samples:
+            max_examples = 10
+            print(
+                f"[WARN] Skipped {len(skipped_samples)} incomplete samples in {self.data_dir}. "
+                f"Using {len(self.samples)} complete samples."
+            )
+            for stem, missing in skipped_samples[:max_examples]:
+                print(f"[WARN] Skipped sample {stem}: missing {', '.join(missing)}")
+            remaining = len(skipped_samples) - max_examples
+            if remaining > 0:
+                print(f"[WARN] ... and {remaining} more incomplete samples.")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -178,6 +199,24 @@ def parse_args() -> TrainConfig:
         help="Call torch.cuda.empty_cache every N optimizer steps. Set 0 to disable.",
     )
     parser.add_argument("--ip_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--train_ip_scale_min",
+        type=float,
+        default=0.0,
+        help="Minimum random IP scale used during training.",
+    )
+    parser.add_argument(
+        "--train_ip_scale_max",
+        type=float,
+        default=0.1,
+        help="Maximum random IP scale used during training. Set equal to min to disable scale augmentation.",
+    )
+    parser.add_argument(
+        "--ip_gate_init",
+        type=float,
+        default=0.1,
+        help="Initial per-layer learnable residual gate for the VGGT adapter.",
+    )
     parser.add_argument(
         "--ip_layers",
         type=int,
@@ -266,18 +305,22 @@ def main() -> None:
             f"({hidden_size}), but got {feature_dim}. Use --init_method zero for VGGT-Omega tokens."
         )
 
-    pipe.transformer, ip_layers = register_ip_adapter_wan(
+    pipe.transformer, ip_layers = register_vggt_ip_adapter(
         pipe.transformer,
         hidden_size=hidden_size,
-        cross_attention_dim=feature_dim,
-        dtype=weight_dtype,
-        init_method=cfg.init_method,
-        layers=cfg.ip_layers,
+        feature_dim=feature_dim,
+        weight_dtype=weight_dtype,
+        cfg=cfg,
+        dist_state=dist_state,
     )
     if cfg.resume_ip_layers:
         from safetensors.torch import load_file
 
-        ip_layers.load_state_dict(load_file(cfg.resume_ip_layers, device="cpu"))
+        missing_keys, unexpected_keys = ip_layers.load_state_dict(load_file(cfg.resume_ip_layers, device="cpu"), strict=False)
+        if unexpected_keys:
+            raise RuntimeError(f"Unexpected resume IP-adapter keys: {unexpected_keys}")
+        if missing_keys and is_main_process(dist_state):
+            print(f"[WARN] Resume checkpoint is missing new stabilization keys, using defaults: {missing_keys}")
 
     if not cfg.deepspeed:
         pipe.transformer.to(device)
@@ -365,12 +408,44 @@ def validate_config(cfg: TrainConfig) -> None:
         raise ValueError("--gradient_accumulation_steps must be positive")
     if cfg.train_batch_size < 1:
         raise ValueError("--train_batch_size must be positive")
+    if cfg.train_ip_scale_min < 0 or cfg.train_ip_scale_max < 0:
+        raise ValueError("--train_ip_scale_min and --train_ip_scale_max must be non-negative")
+    if cfg.train_ip_scale_max < cfg.train_ip_scale_min:
+        raise ValueError("--train_ip_scale_max must be greater than or equal to --train_ip_scale_min")
     if cfg.deepspeed and cfg.device == "cpu":
         raise ValueError("--deepspeed requires CUDA GPUs")
     if not os.path.isdir(cfg.base_model_path):
         raise FileNotFoundError(f"Wan2.1 model directory not found: {cfg.base_model_path}")
     if not os.path.isdir(cfg.vggt_omega_path):
         print(f"[WARN] VGGT-Omega path does not exist: {cfg.vggt_omega_path}. Precomputed .npz features will still be used.")
+
+
+def register_vggt_ip_adapter(
+    transformer: torch.nn.Module,
+    hidden_size: int,
+    feature_dim: int,
+    weight_dtype: torch.dtype,
+    cfg: TrainConfig,
+    dist_state: DistributedState,
+) -> tuple[torch.nn.Module, torch.nn.Module]:
+    register_kwargs = {
+        "hidden_size": hidden_size,
+        "cross_attention_dim": feature_dim,
+        "dtype": weight_dtype,
+        "init_method": cfg.init_method,
+        "layers": cfg.ip_layers,
+    }
+    signature = inspect.signature(register_ip_adapter_wan)
+    if "gate_init" in signature.parameters:
+        register_kwargs["gate_init"] = cfg.ip_gate_init
+    elif is_main_process(dist_state):
+        print(
+            "[WARN] register_ip_adapter_wan() does not support gate_init. "
+            "You are using the old adapter structure; sync modules/lite/attention_processor.py "
+            "to enable gated VGGT adapter stabilization."
+        )
+
+    return register_ip_adapter_wan(transformer, **register_kwargs)
 
 
 def initialize_deepspeed(
@@ -675,17 +750,24 @@ def training_step(
     latent_model_input = noisy_latents.to(dtype=weight_dtype)
     if cfg.gradient_checkpointing:
         latent_model_input.requires_grad_(True)
+    ip_scale = sample_training_ip_scale(cfg)
 
     model_pred = pipe.transformer(
         hidden_states=latent_model_input,
         timestep=timesteps,
         image_embed=vggt_tokens,
-        ip_scale=cfg.ip_scale,
+        ip_scale=ip_scale,
         encoder_hidden_states=prompt_embeds,
         return_dict=False,
     )[0]
 
     return F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+
+def sample_training_ip_scale(cfg: TrainConfig) -> float:
+    if cfg.train_ip_scale_max == cfg.train_ip_scale_min:
+        return float(cfg.train_ip_scale_min)
+    return float(np.random.uniform(cfg.train_ip_scale_min, cfg.train_ip_scale_max))
 
 
 def encode_video_latents(vae, video: torch.Tensor) -> torch.Tensor:

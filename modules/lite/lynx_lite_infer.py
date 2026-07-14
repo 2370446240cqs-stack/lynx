@@ -90,6 +90,7 @@ class LynxLiteWanInfer():
             negative_prompt=style_info.negative_prompt,
             **pipe_inputs,
             ip_scale=getattr(style_info, "ip_scale", 1.0),
+            ip_scale_end=getattr(style_info, "ip_scale_end", None),
             height=style_info.height,
             width=style_info.width,
             num_inference_steps=style_info.num_inference_steps,
