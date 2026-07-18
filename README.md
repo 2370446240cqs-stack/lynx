@@ -1,6 +1,6 @@
 <div align="center">
 
-# Lynx: Towards High-Fidelity Personalized Video Generation
+# Lynx2.0: Towards High-Fidelity Personalized Video Generation
 
 <h5 style="font-size:1.1em; letter-spacing:0.5px;">
 <a href="https://ssangx.github.io/">Shen Sang*</a>&nbsp;&nbsp;&nbsp;
